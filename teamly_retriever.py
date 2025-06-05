@@ -9,6 +9,7 @@ from langchain.schema import Document
 from langchain.schema.runnable import RunnableConfig
 from langchain.schema.retriever import BaseRetriever
 
+import config
 
 # ---------------------------------------------------------------------------
 # Helper decorator – unchanged except for typing tweaks
@@ -50,7 +51,13 @@ class TeamlyRetriever(BaseRetriever):
     }
     ```
     """
-
+    k: int = 10
+    base_url: str = ""
+    client_id: str = ""
+    client_secret: str = ""
+    auth_code: str = ""
+    redirect_uri: str = ""
+    
     # pydantic-style model config so arbitrary attrs are allowed
     class Config:
         arbitrary_types_allowed = True
@@ -93,7 +100,7 @@ class TeamlyRetriever(BaseRetriever):
 
     # --------------------------------- public LangChain hook -------------
 
-    def get_relevant_documents(        # type: ignore[override]
+    def _get_relevant_documents(        # type: ignore[override]
         self,
         query: str,
         *,
@@ -103,7 +110,7 @@ class TeamlyRetriever(BaseRetriever):
         raw_hits = self._semantic_search(query)[: self.k]
         return [self._to_document(hit) for hit in raw_hits]
 
-    async def aget_relevant_documents(  # type: ignore[override]
+    async def _aget_relevant_documents(  # type: ignore[override]
         self,
         query: str,
         *,
@@ -176,20 +183,90 @@ class TeamlyRetriever(BaseRetriever):
 
     def _semantic_search(self, query: str) -> list[dict]:
         """Raw semantic search – returns the provider’s JSON hits."""
+        payload = {
+            "query": query,
+            "limit": 2048
+        }
         return self._post("/api/v1/semantic/external/search", {"query": query})
 
     def _to_document(self, hit: dict) -> Document:
         """
-        Convert a single search hit into a LangChain Document.
-        You might need to tweak the field names to match Teamly’s schema.
-        """
-        page_content = hit.get("text") or hit.get("content") or json.dumps(hit, ensure_ascii=False)
-        metadata = {
-            "title":   hit.get("title"),
-            "url":     hit.get("url") or hit.get("link"),
-            "score":   hit.get("score"),          # similarity score if present
-            "raw_id":  hit.get("id")              # keep original id for tracing
+        Convert one semantic-search hit (see sample payload below) into a
+        LangChain Document.  We keep the full chunk text as page_content
+        and put *everything else* into metadata so you can reference it
+        later for filtering, citation, etc.
+
+        Sample hit:
+        {
+            "space_id": "211ca458-...",
+            "article_id": "f3d0cc75-...",
+            "article_title": "Искусственный интеллект в медицине",
+            "score": 0.80609,
+            "text": "...",
+            "chunk_token_length": 341,
+            "offset": 0,
+            "length": 1429
         }
-        # Remove None values
-        metadata = {k: v for k, v in metadata.items() if v is not None}
-        return Document(page_content=page_content, metadata=metadata)
+        """
+        return Document(
+            page_content=f"{hit["text"]}\n\nСсылка на статью:https://kb.ileasing.ru/space/{hit["space_id"]}/article/{hit["article_id"]}",
+            metadata={
+                # provenance
+                "space_id": hit["space_id"],
+                "article_id": hit["article_id"],
+                "article_title": hit["article_title"],
+                # retrieval info
+                "score": hit["score"],
+                "chunk_token_length": hit["chunk_token_length"],
+                "offset": hit["offset"],
+                "length": hit["length"],
+            },
+        )
+
+if __name__ == "__main__":
+    from langchain_openai import ChatOpenAI
+    from langchain.chains import create_retrieval_chain
+    from langchain.chains.combine_documents import create_stuff_documents_chain
+    from langchain_core.prompts import ChatPromptTemplate, StringPromptTemplate
+    from typing import Any
+    from pprint import pprint
+
+    class KBDocumentPromptTemplate(StringPromptTemplate):
+        max_length : int = 0
+        def __init__(self, max_length: int, **kwargs: Any):
+            super().__init__(**kwargs)
+            self.max_length = max_length
+
+        def format(self, **kwargs: Any) -> str:
+            page_content = kwargs.pop("page_content")
+            #problem_number = kwargs.pop("problem_number")
+            #chunk_size = kwargs.pop("actual_chunk_size")
+            #here additional data could be retrieved based on problem_number
+            result = page_content
+            if self.max_length > 0:
+                result = result[:self.max_length]
+            return result
+
+        @property
+        def _prompt_type(self) -> str:
+            return "kb_document"
+        
+    retriever = TeamlyRetriever("./auth.json", k=5)
+
+    llm = ChatOpenAI(model="gpt-4.1")
+    with open("./prompt.txt", encoding="utf-8") as f:
+        prompt_txt = f.read()
+    system_prompt = ChatPromptTemplate.from_messages(
+            [
+                ("system", prompt_txt),
+                ("human", "User request: \n{input}\n\nContext: \n{context}"),
+            ]
+        )
+
+    my_prompt = KBDocumentPromptTemplate(0, input_variables=["page_content", "article_id", "article_title"])
+
+    docs_chain = create_stuff_documents_chain(llm, system_prompt, document_prompt=my_prompt, document_separator='\n#EOD\n\n')
+    rag_chain = create_retrieval_chain(retriever, docs_chain)
+
+    result = rag_chain.invoke({"input": "КАкие субсидии даёт МПТ?"})
+    pprint(result)
