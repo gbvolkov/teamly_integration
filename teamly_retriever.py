@@ -185,7 +185,7 @@ class TeamlyRetriever(BaseRetriever):
         """Raw semantic search – returns the provider’s JSON hits."""
         payload = {
             "query": query,
-            "limit": 2048
+            "limit": 4096*2
         }
         return self._post("/api/v1/semantic/external/search", {"query": query})
 
@@ -224,12 +224,19 @@ class TeamlyRetriever(BaseRetriever):
         )
 
 if __name__ == "__main__":
+    
+
+
     from langchain_openai import ChatOpenAI
     from langchain.chains import create_retrieval_chain
     from langchain.chains.combine_documents import create_stuff_documents_chain
     from langchain_core.prompts import ChatPromptTemplate, StringPromptTemplate
     from typing import Any
     from pprint import pprint
+    import os
+
+    os.environ["LANGCHAIN_ENDPOINT"]="https://api.smith.langchain.com"
+    os.environ["LANGCHAIN_TRACING_V2"] = "true"
 
     class KBDocumentPromptTemplate(StringPromptTemplate):
         max_length : int = 0
@@ -252,8 +259,10 @@ if __name__ == "__main__":
             return "kb_document"
         
     retriever = TeamlyRetriever("./auth.json", k=5)
+    pages = retriever._semantic_search("Расскажи мне про ключевых пользователей")
+    pprint(pages)
 
-    llm = ChatOpenAI(model="gpt-4.1")
+    llm = ChatOpenAI(model="gpt-4.1-mini")
     with open("./prompt.txt", encoding="utf-8") as f:
         prompt_txt = f.read()
     system_prompt = ChatPromptTemplate.from_messages(
@@ -268,5 +277,5 @@ if __name__ == "__main__":
     docs_chain = create_stuff_documents_chain(llm, system_prompt, document_prompt=my_prompt, document_separator='\n#EOD\n\n')
     rag_chain = create_retrieval_chain(retriever, docs_chain)
 
-    result = rag_chain.invoke({"input": "КАкие субсидии даёт МПТ?"})
+    result = rag_chain.invoke({"input": "Какие продукты мы продаём?"})
     pprint(result)
