@@ -1,2 +1,4 @@
 requests
 rank_llm
+einops
+hf_xet
