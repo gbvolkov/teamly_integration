@@ -34,6 +34,82 @@ def _authorization_wrapper(func):
             return func(self, *args, **kwargs)
     return wrapper
 
+def _get_article_text(base_url: str, article_info: Dict) -> str:
+    """
+    Traverse a ProseMirror-like editor JSON (embedded as a string inside the
+    editorContentObject) and build a single text string where:
+
+    • every node whose type is "text" contributes its text value  
+    • every node (or mark) whose type is "url" *or* "link" contributes the URL  
+    • every node whose type is "paragraph" contributes a newline after its children  
+
+    The traversal is depth-first and keeps the document’s original order.
+    """
+    # 1. Parse the JSON that lives in editorContentObject["content"]
+    raw_doc = article_info["editorContentObject"]["content"]
+    doc = json.loads(raw_doc)
+
+    pieces: List[str] = [article_info["title"]]
+
+    def walk(node: Dict) -> None:
+        ntype = node.get("type")
+
+        # ---  text nodes ----------------------------------------------------
+        if ntype == "text":
+            pieces.append(node.get("text", ""))
+
+            # links may be attached as marks on a text node  -----------------
+            for mark in node.get("marks", []):
+                if mark.get("type") in {"url", "link"}:
+                    url_obj = mark.get("attrs", {}).get("link") or mark.get("attrs", {})
+                    url_placement = url_obj.get("type", "external")
+                    url = url_obj.get("url")
+                    if url:
+                        #if url_placement == "internal":
+                        #    url = f" {self.base_url}{url}"
+                        if not url.startswith("https:") and not url.startswith("mailto:"):
+                            url = base_url + url
+                        pieces.append(f" {url}")
+                elif mark.get("type") in {"media"}:
+                    url = mark.get("attrs", {}).get("src")
+                    if url:
+                        if not url.startswith("https:"):
+                            url = base_url + url
+                        pieces.append(f" {url}")
+
+        # ---  dedicated url / link nodes ------------------------------------
+        elif ntype in {"url", "link"}:
+            url_obj = node.get("attrs", {}).get("link") or node.get("attrs", {})
+            url_placement = url_obj.get("type", "external")
+            url = url_obj.get("url")
+            if url:
+                #if url_placement == "internal":
+                #    url = f" {self.base_url}{url}"
+                if not url.startswith("https:") and not url.startswith("mailto:"):
+                    url = base_url + url
+                pieces.append(f" {url}")
+
+        # ---  dedicated url / link nodes ------------------------------------
+        elif ntype in {"media"}:
+            url = node.get("attrs", {}).get("src") or node.get("attrs", {})
+            if url:
+                if not url.startswith("https:") and not url.startswith("mailto:"):
+                    url = base_url + url
+                pieces.append(f" {url}")
+
+        # ---  newline after a paragraph -------------------------------------
+        elif ntype == "paragraph":
+            pieces.append("\n")
+
+        # ---  recurse into children -----------------------------------------
+        for child in node.get("content", []):
+            walk(child)
+
+
+    # The root is usually a {"type": "doc", ...}
+    walk(doc)
+    return "".join(pieces)
+
 
 # ---------------------------------------------------------------------------
 # Main retriever
@@ -113,8 +189,50 @@ class TeamlyRetriever(BaseRetriever):
     ) -> List[Document]:
         """Synchronous retrieval used by most LC components."""
         raw_hits = self._semantic_search(query)[: self.k]
-        return [self._to_document(hit) for hit in raw_hits]
+        
+        # Group hits by space_id and article_id
+        grouped_hits = {}
+        for hit in raw_hits:
+            key = (hit["space_id"], hit["article_id"])
+            if key not in grouped_hits:
+                grouped_hits[key] = []
+            grouped_hits[key].append(hit)
+        
+        # Merge hits with same space_id and article_id
+        documents = []
+        for hits in grouped_hits.values():
+            if len(hits) == 1:
+                documents.append(self._to_document(hits[0]))
+            else:
+                # Merge multiple hits into one document
+                hits = sorted(hits, key=lambda x: x["offset"])
 
+                merged_text = "\n\n".join(hit["text"] for hit in hits)
+                max_score = max(hit["score"] for hit in hits)
+                total_token_length = sum(hit["chunk_token_length"] for hit in hits)
+                total_length = sum(hit["length"] for hit in hits)
+                offsets = [hit["offset"] for hit in hits]
+                
+                # Use the first hit as base for metadata
+                base_hit = hits[0]
+                document = Document(
+                    page_content=f"{merged_text}\n\nСсылка на статью:https://kb.ileasing.ru/space/{base_hit['space_id']}/article/{base_hit['article_id']}",
+                    metadata={
+                        "docid": f"{base_hit['space_id']}_{base_hit['article_id']}_merged",
+                        "space_id": base_hit["space_id"],
+                        "article_id": base_hit["article_id"],
+                        "article_title": base_hit["article_title"],
+                        "score": max_score,
+                        "chunk_token_length": total_token_length,
+                        "offset": offsets,
+                        "length": total_length,
+                        "merged": True,  # Flag indicating this is a merged document
+                        "original_hits_count": len(hits),  # How many hits were merged
+                    },
+                )
+                documents.append(document)
+    
+        return documents
     async def _aget_relevant_documents(  # type: ignore[override]
         self,
         query: str,
@@ -193,84 +311,6 @@ class TeamlyRetriever(BaseRetriever):
             "limit_count": self.k
         }
         return self._post("/api/v1/semantic/external/search", payload)
-    
-    def _get_article_text(self, article_info: Dict):
-        """
-        Traverse a ProseMirror-like editor JSON (embedded as a string inside the
-        editorContentObject) and build a single text string where:
-
-        • every node whose type is "text" contributes its text value  
-        • every node (or mark) whose type is "url" *or* "link" contributes the URL  
-        • every node whose type is "paragraph" contributes a newline after its children  
-
-        The traversal is depth-first and keeps the document’s original order.
-        """
-        # 1. Parse the JSON that lives in editorContentObject["content"]
-        raw_doc = article_info["editorContentObject"]["content"]
-        doc = json.loads(raw_doc)
-
-        pieces: List[str] = [article_info["title"]]
-
-        def walk(node: Dict) -> None:
-            ntype = node.get("type")
-
-            # ---  text nodes ----------------------------------------------------
-            if ntype == "text":
-                pieces.append(node.get("text", ""))
-
-                # links may be attached as marks on a text node  -----------------
-                for mark in node.get("marks", []):
-                    if mark.get("type") in {"url", "link"}:
-                        url_obj = mark.get("attrs", {}).get("link") or mark.get("attrs", {})
-                        url_placement = url_obj.get("type", "external")
-                        url = url_obj.get("url")
-                        if url:
-                            #if url_placement == "internal":
-                            #    url = f" {self.base_url}{url}"
-                            if not url.startswith("https:") and not url.startswith("mailto:"):
-                                url = self.base_url + url
-                            pieces.append(f" {url}")
-                    elif mark.get("type") in {"media"}:
-                        url = mark.get("attrs", {}).get("src")
-                        if url:
-                            if not url.startswith("https:"):
-                                url = self.base_url + url
-                            pieces.append(f" {url}")
-
-            # ---  dedicated url / link nodes ------------------------------------
-            elif ntype in {"url", "link"}:
-                url_obj = node.get("attrs", {}).get("link") or node.get("attrs", {})
-                url_placement = url_obj.get("type", "external")
-                url = url_obj.get("url")
-                if url:
-                    #if url_placement == "internal":
-                    #    url = f" {self.base_url}{url}"
-                    if not url.startswith("https:") and not url.startswith("mailto:"):
-                        url = self.base_url + url
-                    pieces.append(f" {url}")
-
-            # ---  dedicated url / link nodes ------------------------------------
-            elif ntype in {"media"}:
-                url = node.get("attrs", {}).get("src") or node.get("attrs", {})
-                if url:
-                    if not url.startswith("https:") and not url.startswith("mailto:"):
-                        url = self.base_url + url
-                    pieces.append(f" {url}")
-
-            # ---  newline after a paragraph -------------------------------------
-            elif ntype == "paragraph":
-                pieces.append("\n")
-
-            # ---  recurse into children -----------------------------------------
-            for child in node.get("content", []):
-                walk(child)
-
-
-        # The root is usually a {"type": "doc", ...}
-        walk(doc)
-        return "".join(pieces)
-
-
 
     def get_article(self, article_id: str, max_length: int = 0) -> str:
         payload = {
@@ -286,7 +326,7 @@ class TeamlyRetriever(BaseRetriever):
             }
         }
         article_info = self._post("/api/v1/wiki/ql/article", payload)
-        text = self._get_article_text(article_info)
+        text = _get_article_text(self.base_url, article_info)
         return text
 
 
@@ -313,7 +353,6 @@ class TeamlyRetriever(BaseRetriever):
             page_content=f"{hit["text"]}\n\nСсылка на статью:https://kb.ileasing.ru/space/{hit["space_id"]}/article/{hit["article_id"]}",
             metadata={
                 # provenance
-                "docid": f"{hit['space_id']}_{hit['article_id']}_{hit['offset']}",
                 "space_id": hit["space_id"],
                 "article_id": hit["article_id"],
                 "article_title": hit["article_title"],
@@ -366,9 +405,8 @@ if __name__ == "__main__":
 
         def format(self, **kwargs: Any) -> str:
             page_content = kwargs.pop("page_content")
-            #problem_number = kwargs.pop("problem_number")
-            #chunk_size = kwargs.pop("actual_chunk_size")
-            #here additional data could be retrieved based on problem_number
+            #article_id = kwargs.pop("article_id")
+            #page_content = _get_article_text()
             result = page_content
             if self.max_length > 0:
                 result = result[:self.max_length]
@@ -381,7 +419,26 @@ if __name__ == "__main__":
     from langchain_core.callbacks.manager import Callbacks
     from rank_llm.data import Candidate, Query, Request
     from copy import deepcopy
-
+    from langchain_core.callbacks import (
+        AsyncCallbackManagerForRetrieverRun,
+        CallbackManagerForRetrieverRun,
+    )
+    class TeamlyContextualCompressionRetriever(ContextualCompressionRetriever):
+        def _get_relevant_documents(
+            self,
+            query: str,
+            *,
+            run_manager: CallbackManagerForRetrieverRun,
+            **kwargs: Any,
+        ) -> list[Document]:
+            documents = super()._get_relevant_documents(query, run_manager=run_manager, kwargs=kwargs)
+            if isinstance(self.base_retriever, TeamlyRetriever):
+                for doc in documents:
+                    article_id = doc.get("article_id")
+                    if article_id:
+                        doc["page_content"] = self.base_retriever.get_article(article_id)
+            return documents
+            
     class RankLLMRerank_GV(RankLLMRerank):
         def compress_documents(
             self,
@@ -437,7 +494,7 @@ if __name__ == "__main__":
             ]
         )
 
-    my_prompt = KBDocumentPromptTemplate(0, input_variables=["page_content", "article_id", "article_title", "docid"])
+    my_prompt = KBDocumentPromptTemplate(0, input_variables=["page_content", "article_id", "article_title"])
     
     import torch
     if torch.cuda.is_available():
@@ -450,7 +507,7 @@ if __name__ == "__main__":
 
     #reranker = RankLLMRerank_GV(top_n=5, model="zephyr", gpt_model="gpt-4.1-nano")
 
-    retriever = ContextualCompressionRetriever(
+    retriever = TeamlyContextualCompressionRetriever(
             base_compressor=reranker, base_retriever=teamly_retriever
             )
     
