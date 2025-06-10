@@ -8,6 +8,11 @@ from typing import List, Optional
 from langchain.schema import Document
 from langchain.schema.runnable import RunnableConfig
 from langchain.schema.retriever import BaseRetriever
+from langchain.retrievers.contextual_compression import ContextualCompressionRetriever
+from langchain.retrievers.document_compressors import CrossEncoderReranker
+from langchain.retrievers.multi_vector import MultiVectorRetriever
+from langchain_community.cross_encoders import HuggingFaceCrossEncoder
+from langchain_community.document_compressors.rankllm_rerank import RankLLMRerank
 
 import config
 
@@ -185,9 +190,9 @@ class TeamlyRetriever(BaseRetriever):
         """Raw semantic search – returns the provider’s JSON hits."""
         payload = {
             "query": query,
-            "limit": 4096*2
+            "limit_count": self.k
         }
-        return self._post("/api/v1/semantic/external/search", {"query": query})
+        return self._post("/api/v1/semantic/external/search", payload)
 
     def _to_document(self, hit: dict) -> Document:
         """
@@ -224,7 +229,24 @@ class TeamlyRetriever(BaseRetriever):
         )
 
 if __name__ == "__main__":
-    
+    def save_context(docs: List['Document'], file_path: str) -> None:
+        """
+        Serialize a list of Document objects to a JSON file.
+        Each document will be represented as:
+        {
+            "metadata": { ... },
+            "page_content": "..."
+        }
+        """
+        serialized = []
+        for doc in docs:
+            serialized.append({
+                'metadata': doc.metadata,
+                'page_content': doc.page_content
+            })
+
+        with open(file_path, 'w', encoding='utf-8') as f:
+            json.dump(serialized, f, ensure_ascii=False, indent=4)
 
 
     from langchain_openai import ChatOpenAI
@@ -237,6 +259,7 @@ if __name__ == "__main__":
 
     os.environ["LANGCHAIN_ENDPOINT"]="https://api.smith.langchain.com"
     os.environ["LANGCHAIN_TRACING_V2"] = "true"
+    query = "Какие виды субсидий МСП мы предоставляем нашим клиентам?"
 
     class KBDocumentPromptTemplate(StringPromptTemplate):
         max_length : int = 0
@@ -258,9 +281,11 @@ if __name__ == "__main__":
         def _prompt_type(self) -> str:
             return "kb_document"
         
-    retriever = TeamlyRetriever("./auth.json", k=5)
-    pages = retriever._semantic_search("Расскажи мне про ключевых пользователей")
-    pprint(pages)
+    teamly_retriever = TeamlyRetriever("./auth.json", k=100)
+    pages = teamly_retriever._semantic_search(query)
+    with open("data/pages.json", "w", encoding="utf-8") as fp:
+        json.dump(pages, fp, ensure_ascii=False, indent=4)
+    #pprint(pages)
 
     llm = ChatOpenAI(model="gpt-4.1-mini")
     with open("./prompt.txt", encoding="utf-8") as f:
@@ -273,9 +298,40 @@ if __name__ == "__main__":
         )
 
     my_prompt = KBDocumentPromptTemplate(0, input_variables=["page_content", "article_id", "article_title"])
+    #reranker_model = HuggingFaceCrossEncoder(model_name=config.RERANKING_MODEL)
+    #reranker = CrossEncoderReranker(model=reranker_model, top_n=5)
 
+    reranker = RankLLMRerank(top_n=5, model="zephyr", gpt_model="gpt-4.1-nano")
+
+    retriever = ContextualCompressionRetriever(
+            base_compressor=reranker, base_retriever=teamly_retriever
+            )
+    
     docs_chain = create_stuff_documents_chain(llm, system_prompt, document_prompt=my_prompt, document_separator='\n#EOD\n\n')
     rag_chain = create_retrieval_chain(retriever, docs_chain)
 
-    result = rag_chain.invoke({"input": "Какие продукты мы продаём?"})
-    pprint(result)
+    result = rag_chain.invoke({"input": query})
+    pprint(result["answer"])
+
+    save_context(result["context"], "./data/context.json")
+
+
+    import pandas as pd
+    articles = []
+    mscore = 1
+    df = pd.read_csv("./data/questions.csv", encoding="utf-8")
+    for idx, row in df.iterrows():
+        q = row["prompt"]
+        if not pd.isna(q) and q != "":
+            pages = retriever._semantic_search(q)
+            
+            scores = [p["score"] for p in pages if "score" in p]
+            if len(scores) > 0:
+                mscore = min(mscore, min(scores))
+
+            articles.append(pages)
+        else:
+            articles.append([])
+    print(mscore)
+    df["articles"] = articles
+    df.to_csv("./data/q_with_pages.csv", encoding="utf-8")
