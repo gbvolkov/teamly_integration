@@ -64,7 +64,7 @@ def _get_article_text(base_url: str, article_info: Dict) -> str:
                     url_obj = mark.get("attrs", {}).get("link") or mark.get("attrs", {})
                     url_placement = url_obj.get("type", "external")
                     url = url_obj.get("url")
-                    if url:
+                    if url and isinstance(url, str):
                         #if url_placement == "internal":
                         #    url = f" {self.base_url}{url}"
                         if not url.startswith("https:") and not url.startswith("mailto:"):
@@ -72,7 +72,7 @@ def _get_article_text(base_url: str, article_info: Dict) -> str:
                         pieces.append(f" {url}")
                 elif mark.get("type") in {"media"}:
                     url = mark.get("attrs", {}).get("src")
-                    if url:
+                    if url and isinstance(url, str):
                         if not url.startswith("https:"):
                             url = base_url + url
                         pieces.append(f" {url}")
@@ -82,7 +82,7 @@ def _get_article_text(base_url: str, article_info: Dict) -> str:
             url_obj = node.get("attrs", {}).get("link") or node.get("attrs", {})
             url_placement = url_obj.get("type", "external")
             url = url_obj.get("url")
-            if url:
+            if url and isinstance(url, str):
                 #if url_placement == "internal":
                 #    url = f" {self.base_url}{url}"
                 if not url.startswith("https:") and not url.startswith("mailto:"):
@@ -92,7 +92,7 @@ def _get_article_text(base_url: str, article_info: Dict) -> str:
         # ---  dedicated url / link nodes ------------------------------------
         elif ntype in {"media"}:
             url = node.get("attrs", {}).get("src") or node.get("attrs", {})
-            if url:
+            if url and isinstance(url, str):
                 if not url.startswith("https:") and not url.startswith("mailto:"):
                     url = base_url + url
                 pieces.append(f" {url}")
@@ -395,7 +395,7 @@ if __name__ == "__main__":
 
     os.environ["LANGCHAIN_ENDPOINT"]="https://api.smith.langchain.com"
     os.environ["LANGCHAIN_TRACING_V2"] = "true"
-    query = "Какие виды субсидий МСП мы предоставляем нашим клиентам?"
+    query = "возможности обучения в Interleasing для менеджеров по продажам"
 
     class KBDocumentPromptTemplate(StringPromptTemplate):
         max_length : int = 0
@@ -431,12 +431,13 @@ if __name__ == "__main__":
             run_manager: CallbackManagerForRetrieverRun,
             **kwargs: Any,
         ) -> list[Document]:
-            documents = super()._get_relevant_documents(query, run_manager=run_manager, kwargs=kwargs)
+            documents = super()._get_relevant_documents(query, run_manager=run_manager, **kwargs)
             if isinstance(self.base_retriever, TeamlyRetriever):
                 for doc in documents:
-                    article_id = doc.get("article_id")
+                    article_id = doc.metadata.get("article_id")
+                    space_id = doc.metadata.get("space_id", "")
                     if article_id:
-                        doc["page_content"] = self.base_retriever.get_article(article_id)
+                        doc.page_content = f"{self.base_retriever.get_article(article_id)}\n\nСсылка на статью: {self.base_retriever.base_url}/space/{space_id}/article/{article_id}"
             return documents
             
     class RankLLMRerank_GV(RankLLMRerank):
