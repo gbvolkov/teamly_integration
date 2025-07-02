@@ -3,16 +3,16 @@ from __future__ import annotations
 import functools
 import json
 import requests
-from typing import List, Optional
+from typing import List, Optional, Dict
 
 from langchain.schema import Document
 from langchain.schema.runnable import RunnableConfig
 from langchain.schema.retriever import BaseRetriever
 from langchain.retrievers.contextual_compression import ContextualCompressionRetriever
-from langchain.retrievers.document_compressors import CrossEncoderReranker
-from langchain.retrievers.multi_vector import MultiVectorRetriever
-from langchain_community.cross_encoders import HuggingFaceCrossEncoder
-from langchain_community.document_compressors.rankllm_rerank import RankLLMRerank
+from langchain_core.callbacks import (
+    AsyncCallbackManagerForRetrieverRun,
+    CallbackManagerForRetrieverRun,
+)
 
 import config
 
@@ -49,66 +49,69 @@ def _get_article_text(base_url: str, article_info: Dict) -> str:
     raw_doc = article_info["editorContentObject"]["content"]
     doc = json.loads(raw_doc)
 
-    pieces: List[str] = [article_info["title"]]
+    pieces: List[str] = [article_info["title"], "\n"]
 
-    def walk(node: Dict) -> None:
-        ntype = node.get("type")
+    def walk(nodes: Dict | list) -> None:
+        if not isinstance(nodes, list):
+            nodes = [nodes]
+        for node in nodes:
+            ntype = node.get("type")
 
-        # ---  text nodes ----------------------------------------------------
-        if ntype == "text":
-            pieces.append(node.get("text", ""))
+            # ---  text nodes ----------------------------------------------------
+            if ntype == "text":
+                pieces.append(node.get("text", ""))
 
-            # links may be attached as marks on a text node  -----------------
-            for mark in node.get("marks", []):
-                if mark.get("type") in {"url", "link"}:
-                    url_obj = mark.get("attrs", {}).get("link") or mark.get("attrs", {})
-                    url_placement = url_obj.get("type", "external")
-                    url = url_obj.get("url")
-                    if url and isinstance(url, str):
-                        #if url_placement == "internal":
-                        #    url = f" {self.base_url}{url}"
-                        if not url.startswith("https:") and not url.startswith("mailto:"):
-                            url = base_url + url
-                        pieces.append(f" {url}")
-                elif mark.get("type") in {"media"}:
-                    url = mark.get("attrs", {}).get("src")
-                    if url and isinstance(url, str):
-                        if not url.startswith("https:"):
-                            url = base_url + url
-                        pieces.append(f" {url}")
+                # links may be attached as marks on a text node  -----------------
+                for mark in node.get("marks", []):
+                    if mark.get("type") in {"url", "link"}:
+                        url_obj = mark.get("attrs", {}).get("link") or mark.get("attrs", {})
+                        url_placement = url_obj.get("type", "external")
+                        url = url_obj.get("url")
+                        if url and isinstance(url, str):
+                            #if url_placement == "internal":
+                            #    url = f" {self.base_url}{url}"
+                            if not url.startswith("https:") and not url.startswith("mailto:"):
+                                url = base_url + url
+                            pieces.append(f" {url}")
+                    elif mark.get("type") in {"media"}:
+                        url = mark.get("attrs", {}).get("src")
+                        if url and isinstance(url, str) and not url.startswith("data:"):
+                            if not url.startswith("https:"):
+                                url = base_url + url
+                            pieces.append(f" {url}")
 
-        # ---  dedicated url / link nodes ------------------------------------
-        elif ntype in {"url", "link"}:
-            url_obj = node.get("attrs", {}).get("link") or node.get("attrs", {})
-            url_placement = url_obj.get("type", "external")
-            url = url_obj.get("url")
-            if url and isinstance(url, str):
-                #if url_placement == "internal":
-                #    url = f" {self.base_url}{url}"
-                if not url.startswith("https:") and not url.startswith("mailto:"):
-                    url = base_url + url
-                pieces.append(f" {url}")
+            # ---  dedicated url / link nodes ------------------------------------
+            elif ntype in {"url", "link"}:
+                url_obj = node.get("attrs", {}).get("link") or node.get("attrs", {})
+                url_placement = url_obj.get("type", "external")
+                url = url_obj.get("url")
+                if url and isinstance(url, str):
+                    #if url_placement == "internal":
+                    #    url = f" {self.base_url}{url}"
+                    if not url.startswith("https:") and not url.startswith("mailto:"):
+                        url = base_url + url
+                    pieces.append(f" {url}")
 
-        # ---  dedicated url / link nodes ------------------------------------
-        elif ntype in {"media"}:
-            url = node.get("attrs", {}).get("src") or node.get("attrs", {})
-            if url and isinstance(url, str):
-                if not url.startswith("https:") and not url.startswith("mailto:"):
-                    url = base_url + url
-                pieces.append(f" {url}")
+            # ---  dedicated url / link nodes ------------------------------------
+            elif ntype in {"media"}:
+                url = node.get("attrs", {}).get("src") or node.get("attrs", {})
+                if url and isinstance(url, str) and not url.startswith("data:"):
+                    if not url.startswith("https:") and not url.startswith("mailto:"):
+                        url = base_url + url
+                    pieces.append(f" {url}")
 
-        # ---  newline after a paragraph -------------------------------------
-        elif ntype == "paragraph":
-            pieces.append("\n")
+            # ---  newline after a paragraph -------------------------------------
+            elif ntype == "paragraph":
+                pieces.append("\n")
 
-        # ---  recurse into children -----------------------------------------
-        for child in node.get("content", []):
-            walk(child)
+            # ---  recurse into children -----------------------------------------
+            for child in node.get("content", []):
+                walk(child)
 
 
     # The root is usually a {"type": "doc", ...}
     walk(doc)
-    return "".join(pieces)
+    return "".join(pieces)[:128000]
 
 
 # ---------------------------------------------------------------------------
@@ -185,7 +188,8 @@ class TeamlyRetriever(BaseRetriever):
         self,
         query: str,
         *,
-        config: Optional[RunnableConfig] = None,  # for LC internal plumbing
+        run_manager: CallbackManagerForRetrieverRun,
+        **kwargs: Any,  # for LC internal plumbing
     ) -> List[Document]:
         """Synchronous retrieval used by most LC components."""
         raw_hits = self._semantic_search(query)[: self.k]
@@ -364,38 +368,34 @@ class TeamlyRetriever(BaseRetriever):
             },
         )
 
+
+class TeamlyContextualCompressionRetriever(ContextualCompressionRetriever):
+    def _get_relevant_documents(
+        self,
+        query: str,
+        *,
+        run_manager: CallbackManagerForRetrieverRun,
+        **kwargs: Any,
+    ) -> list[Document]:
+        documents = super()._get_relevant_documents(query, run_manager=run_manager, **kwargs)
+        if isinstance(self.base_retriever, TeamlyRetriever):
+            for doc in documents:
+                article_id = doc.metadata.get("article_id")
+                space_id = doc.metadata.get("space_id", "")
+                if article_id:
+                    doc.page_content = f"{self.base_retriever.get_article(article_id)}\n\nСсылка на статью: {self.base_retriever.base_url}/space/{space_id}/article/{article_id}"
+        return documents
+
 if __name__ == "__main__":
-    def save_context(docs: List['Document'], file_path: str) -> None:
-        """
-        Serialize a list of Document objects to a JSON file.
-        Each document will be represented as:
-        {
-            "metadata": { ... },
-            "page_content": "..."
-        }
-        """
-        serialized = []
-        for doc in docs:
-            serialized.append({
-                'metadata': doc.metadata,
-                'page_content': doc.page_content
-            })
-
-        with open(file_path, 'w', encoding='utf-8') as f:
-            json.dump(serialized, f, ensure_ascii=False, indent=4)
-
-
     from langchain_openai import ChatOpenAI
     from langchain.chains import create_retrieval_chain
     from langchain.chains.combine_documents import create_stuff_documents_chain
     from langchain_core.prompts import ChatPromptTemplate, StringPromptTemplate
+    from langchain_community.cross_encoders import HuggingFaceCrossEncoder
+    from langchain.retrievers.document_compressors import CrossEncoderReranker
+    import torch
     from typing import Any
     from pprint import pprint
-    import os
-
-    os.environ["LANGCHAIN_ENDPOINT"]="https://api.smith.langchain.com"
-    os.environ["LANGCHAIN_TRACING_V2"] = "true"
-    query = "возможности обучения в Interleasing для менеджеров по продажам"
 
     class KBDocumentPromptTemplate(StringPromptTemplate):
         max_length : int = 0
@@ -405,8 +405,9 @@ if __name__ == "__main__":
 
         def format(self, **kwargs: Any) -> str:
             page_content = kwargs.pop("page_content")
-            #article_id = kwargs.pop("article_id")
-            #page_content = _get_article_text()
+            #problem_number = kwargs.pop("problem_number")
+            #chunk_size = kwargs.pop("actual_chunk_size")
+            #here additional data could be retrieved based on problem_number
             result = page_content
             if self.max_length > 0:
                 result = result[:self.max_length]
@@ -415,75 +416,19 @@ if __name__ == "__main__":
         @property
         def _prompt_type(self) -> str:
             return "kb_document"
-    from typing import TYPE_CHECKING, Any, Dict, Optional, Sequence
-    from langchain_core.callbacks.manager import Callbacks
-    from rank_llm.data import Candidate, Query, Request
-    from copy import deepcopy
-    from langchain_core.callbacks import (
-        AsyncCallbackManagerForRetrieverRun,
-        CallbackManagerForRetrieverRun,
-    )
-    class TeamlyContextualCompressionRetriever(ContextualCompressionRetriever):
-        def _get_relevant_documents(
-            self,
-            query: str,
-            *,
-            run_manager: CallbackManagerForRetrieverRun,
-            **kwargs: Any,
-        ) -> list[Document]:
-            documents = super()._get_relevant_documents(query, run_manager=run_manager, **kwargs)
-            if isinstance(self.base_retriever, TeamlyRetriever):
-                for doc in documents:
-                    article_id = doc.metadata.get("article_id")
-                    space_id = doc.metadata.get("space_id", "")
-                    if article_id:
-                        doc.page_content = f"{self.base_retriever.get_article(article_id)}\n\nСсылка на статью: {self.base_retriever.base_url}/space/{space_id}/article/{article_id}"
-            return documents
-            
-    class RankLLMRerank_GV(RankLLMRerank):
-        def compress_documents(
-            self,
-            documents: Sequence[Document],
-            query: str,
-            callbacks: Optional[Callbacks] = None,
-        ) -> Sequence[Document]:
-            request = Request(
-                query=Query(text=query, qid=1),
-                candidates=[
-                    Candidate(doc={"text": doc.page_content}, docid=index, score=1)
-                    for index, doc in enumerate(documents)
-                ],
+        
+    MAX_RETRIEVALS = 3
+
+    teamly_retriever = TeamlyRetriever("./auth.json", k=40)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    reranker_model = HuggingFaceCrossEncoder(model_name=config.RERANKING_MODEL, model_kwargs = {'trust_remote_code': True, "device": device})
+    reranker = CrossEncoderReranker(model=reranker_model, top_n=MAX_RETRIEVALS)
+    retriever = TeamlyContextualCompressionRetriever(
+            base_compressor=reranker, base_retriever=teamly_retriever
             )
 
-            rerank_results = self.client.rerank(
-                request,
-                rank_end=len(documents),
-                window_size=min(20, len(documents)),
-                step=10,
-            )
-            final_results = []
-            if isinstance(rerank_results, list) and hasattr(rerank_results[0], "candidates"):
-                rerank_results = rerank_results[0]
-            if hasattr(rerank_results, "candidates"):
-                # Old API format
-                for res in rerank_results.candidates:
-                    doc = documents[int(res.docid)]
-                    doc_copy = Document(doc.page_content, metadata=deepcopy(doc.metadata))
-                    final_results.append(doc_copy)
-            else:
-                for res in rerank_results:
-                    doc = documents[int(res.docid)]
-                    doc_copy = Document(doc.page_content, metadata=deepcopy(doc.metadata))
-                    final_results.append(doc_copy)
 
-            return final_results[: self.top_n]
-
-
-    teamly_retriever = TeamlyRetriever("./auth.json", k=100)
-    pages = teamly_retriever._semantic_search(query)
-    with open("data/pages.json", "w", encoding="utf-8") as fp:
-        json.dump(pages, fp, ensure_ascii=False, indent=4)
-    #pprint(pages)
+    docs = retriever.invoke("агентский договор оформление")
 
     llm = ChatOpenAI(model="gpt-4.1-mini")
     with open("./prompt.txt", encoding="utf-8") as f:
@@ -496,50 +441,9 @@ if __name__ == "__main__":
         )
 
     my_prompt = KBDocumentPromptTemplate(0, input_variables=["page_content", "article_id", "article_title"])
-    
-    import torch
-    if torch.cuda.is_available():
-        device = "cuda"
-    else:
-        device="cpu"
-        
-    reranker_model = HuggingFaceCrossEncoder(model_name=config.RERANKING_MODEL, model_kwargs = {'trust_remote_code': True, "device": device})
-    reranker = CrossEncoderReranker(model=reranker_model, top_n=5)
 
-    #reranker = RankLLMRerank_GV(top_n=5, model="zephyr", gpt_model="gpt-4.1-nano")
-
-    retriever = TeamlyContextualCompressionRetriever(
-            base_compressor=reranker, base_retriever=teamly_retriever
-            )
-    
     docs_chain = create_stuff_documents_chain(llm, system_prompt, document_prompt=my_prompt, document_separator='\n#EOD\n\n')
     rag_chain = create_retrieval_chain(retriever, docs_chain)
 
-    result = rag_chain.invoke({"input": query})
-    pprint(result["answer"])
-
-    save_context(result["context"], "./data/context.json")
-
-    article_id = result["context"][0].metadata["article_id"]
-    article_id = "1ae5a864-9c2e-4f3a-a49d-e9ba0372aa27"
-    article = teamly_retriever.get_article(article_id)
-
-    import pandas as pd
-    articles = []
-    mscore = 1
-    df = pd.read_csv("./data/questions.csv", encoding="utf-8")
-    for idx, row in df.iterrows():
-        q = row["prompt"]
-        if not pd.isna(q) and q != "":
-            pages = retriever._semantic_search(q)
-            
-            scores = [p["score"] for p in pages if "score" in p]
-            if len(scores) > 0:
-                mscore = min(mscore, min(scores))
-
-            articles.append(pages)
-        else:
-            articles.append([])
-    print(mscore)
-    df["articles"] = articles
-    df.to_csv("./data/q_with_pages.csv", encoding="utf-8")
+    result = rag_chain.invoke({"input": "агентский договор оформление"})
+    pprint(result)
