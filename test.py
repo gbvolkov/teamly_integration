@@ -4,7 +4,7 @@ from pprint import pprint
 
 BASE_URL = "https://kb.ileasing.ru"
 
-AUTH_DATA = "./auth.json"
+AUTH_DATA = "./auth2.json"
 REDIRECT_URI = "https://kb.ileasing.ru/api/v1/semantic/external/search"
 
 with open(AUTH_DATA, "r", encoding="utf-8") as f:
@@ -195,9 +195,9 @@ if __name__ == "__main__":
         client_secret = auth_data.get("client_secret")
         auth_code = auth_data.get("auth_code")
 
-        #auth_response = authorize_integration()
+        auth_response = authorize_integration()
 
-        auth_response = refresh_auth(auth_code)
+        #auth_response = refresh_auth(auth_code)
 
         # Example of how to extract values from the response:
         #user_info = auth_response.get("user", {})
@@ -222,6 +222,35 @@ if __name__ == "__main__":
         users = get_user(access_token, "volkovgb@ileasing.ru")
         #pprint(users)
         user_id = users.get("items")[0].get("userId")
+
+
+        headers = {
+            "X-Account-Slug": "default",
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {access_token}"
+        }
+
+        # Ссылка на получение метаданных файла
+        metadata_url = "https://kb.ileasing.ru/api/v1/disk/storage/3eeb16bd-6cc1-4283-8508-78ed16447ddb/doc/853ba3d8-1aba-4eea-b5fa-5c6f09284182"
+
+        # Ссылка для скачивания самого файла
+        download_url = metadata_url + "/view"
+
+
+        response = requests.get(metadata_url, headers=headers)
+        response.raise_for_status()
+        data = response.json()
+        filename = data.get("title", "downloaded_file")
+
+        # Загружаем файл
+        file_response = requests.get(download_url, headers=headers)
+        if file_response.status_code == 200:
+            with open(filename, "wb") as f:
+                f.write(file_response.content)
+            print(f"Файл '{filename}' успешно загружен и сохранён.")
+        else:
+            print(f"Ошибка при загрузке файла: {file_response.status_code}")
+
 
         #spaces = list_spaces(access_token)
         #pprint(spaces)
