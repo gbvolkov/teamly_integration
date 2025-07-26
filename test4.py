@@ -15,7 +15,7 @@ df = get_data_from_json(doc)
 
 (idx_vectors, idx_bm25) = get_retrievers(df)
 v_res = idx_vectors.similarity_search(query, k=5)
-bm25_res = idx_bm25.get_relevant_documents(query)[:5]
+bm25_res = idx_bm25.invoke(query)[:5]
 
 print(v_res)
 print(bm25_res)
