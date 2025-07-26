@@ -317,6 +317,10 @@ class TeamlyRetriever(BaseRetriever):
         return self._post("/api/v1/semantic/external/search", payload)
 
     def get_article(self, article_id: str, max_length: int = 0) -> str:
+        article_info = self.get_article_info(article_id)
+        return _get_article_text(self.base_url, article_info)
+
+    def get_article_info(self, article_id: str) -> str:
         payload = {
             "query": {
                 "__filter": {
@@ -329,9 +333,7 @@ class TeamlyRetriever(BaseRetriever):
                 }                
             }
         }
-        article_info = self._post("/api/v1/wiki/ql/article", payload)
-        return _get_article_text(self.base_url, article_info)
-
+        return self._post("/api/v1/wiki/ql/article", payload)
 
     def _to_document(self, hit: dict) -> Document:
         """

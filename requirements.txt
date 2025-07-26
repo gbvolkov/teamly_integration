@@ -2,3 +2,4 @@ requests
 rank_llm
 einops
 hf_xet
+rank_bm25

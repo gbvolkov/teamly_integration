@@ -69,6 +69,49 @@ def refresh_auth(refresh_token):
 
     return response.json()
 
+def auth_post(url: str, payload: dict) -> str:
+    # No bearer header during auth flow
+    resp = requests.post(url, json=payload, headers={"Content-Type": "application/json", "Accept": "application/json"})
+    resp.raise_for_status()
+    data = resp.json()
+    refresh_token = data.get("refresh_token")
+    access_token  = data.get("access_token")
+
+    # Persist fresh refresh-token
+    auth_code = refresh_token or access_token
+    _auth_data["auth_code"] = auth_code
+    with open(self._auth_path, "w", encoding="utf-8") as fp:
+        json.dump(self._auth_data, fp, ensure_ascii=False, indent=4)
+
+    return access_token
+
+def refresh_token(client_id, client_secret, redirect_uri, auth_code) -> str:
+    return self._auth_post(
+        f"{self.base_url}/api/v1/auth/integration/refresh",
+        {
+            "client_id":     client_id,
+            "client_secret": client_secret,
+            "refresh_token": auth_code,
+        },
+    )
+
+def authorise(client_id, client_secret, redirect_uri, auth_code) -> str:
+    return self._auth_post(
+        f"{self.base_url}/api/v1/auth/integration/authorize",
+        {
+            "client_id":     client_id,
+            "client_secret": client_secret,
+            "redirect_uri":  redirect_uri,
+            "code":          auth_code,
+        },
+    )
+
+def get_token(client_id, client_secret, redirect_uri, auth_code) -> str:
+    try:
+        return refresh_token(client_id, client_secret, redirect_uri, auth_code)
+    except requests.HTTPError:
+        return authorise(client_id, client_secret, redirect_uri, auth_code)
+
 def get_user(access_token, user_name):
     url = f"{BASE_URL}/api/v1/ql/account-users"
     headers = {
@@ -184,6 +227,8 @@ def list_spaces(access_token):
 
     return response.json()
 
+
+
 if __name__ == "__main__":
     # Example usage:
 
@@ -195,9 +240,9 @@ if __name__ == "__main__":
         client_secret = auth_data.get("client_secret")
         auth_code = auth_data.get("auth_code")
 
-        auth_response = authorize_integration()
+        #auth_response = authorize_integration()
 
-        #auth_response = refresh_auth(auth_code)
+        auth_response = refresh_auth(auth_code)
 
         # Example of how to extract values from the response:
         #user_info = auth_response.get("user", {})
@@ -231,32 +276,32 @@ if __name__ == "__main__":
         }
 
         # Ссылка на получение метаданных файла
-        metadata_url = "https://kb.ileasing.ru/api/v1/disk/storage/3eeb16bd-6cc1-4283-8508-78ed16447ddb/doc/853ba3d8-1aba-4eea-b5fa-5c6f09284182"
+        #metadata_url = "https://kb.ileasing.ru/api/v1/disk/storage/3eeb16bd-6cc1-4283-8508-78ed16447ddb/doc/853ba3d8-1aba-4eea-b5fa-5c6f09284182"
 
         # Ссылка для скачивания самого файла
-        download_url = metadata_url + "/view"
+        #download_url = metadata_url + "/view"
 
 
-        response = requests.get(metadata_url, headers=headers)
-        response.raise_for_status()
-        data = response.json()
-        filename = data.get("title", "downloaded_file")
+        #response = requests.get(metadata_url, headers=headers)
+        #response.raise_for_status()
+        #data = response.json()
+        #filename = data.get("title", "downloaded_file")
 
         # Загружаем файл
-        file_response = requests.get(download_url, headers=headers)
-        if file_response.status_code == 200:
-            with open(filename, "wb") as f:
-                f.write(file_response.content)
-            print(f"Файл '{filename}' успешно загружен и сохранён.")
-        else:
-            print(f"Ошибка при загрузке файла: {file_response.status_code}")
+        #file_response = requests.get(download_url, headers=headers)
+        #if file_response.status_code == 200:
+        #    with open(filename, "wb") as f:
+        #        f.write(file_response.content)
+        #    print(f"Файл '{filename}' успешно загружен и сохранён.")
+        #else:
+        #    print(f"Ошибка при загрузке файла: {file_response.status_code}")
 
 
         #spaces = list_spaces(access_token)
         #pprint(spaces)
 
         #access_token = auth_code
-        found = semantic_search(access_token, user_id, "Вы работаете с грузовым транспортом?")
+        found = semantic_search(access_token, user_id, "настройка микросип")
         pprint(found)
 
     except requests.HTTPError as http_err:
