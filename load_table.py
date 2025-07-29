@@ -4,7 +4,7 @@ import pandas as pd
 
 
 
-def get_data_from_json(data: str):
+def get_data_from_json(data: str, space_id: str, article_id: str, article_title: str):
     # ---------- helpers ----------
     def extract_text(node):
         """Recursively pull plain text from TipTap/ProseMirror nodes."""
@@ -72,5 +72,7 @@ def get_data_from_json(data: str):
         "Пример Тикетов": "ticket_example"
     }
     df = df.rename(columns=rename_map)
+    df[["space_id", "article_id", "article_title"]] = (space_id, article_id, article_title)
+    #df["problem_description"] = df["problem_description"] + "\n\nСсылка на статью:https://kb.ileasing.ru/space/{space_id}/article/{article_id}"
     return df
 

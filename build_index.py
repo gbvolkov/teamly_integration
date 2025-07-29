@@ -1,7 +1,7 @@
 import pandas as pd
 
 from langchain_huggingface import HuggingFaceEmbeddings
-from langchain.vectorstores import FAISS
+from langchain_community.vectorstores import FAISS
 from langchain_community.retrievers import BM25Retriever
 
 from build_documents import get_documents

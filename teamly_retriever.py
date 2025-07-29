@@ -4,6 +4,10 @@ import functools
 import json
 import requests
 from typing import List, Optional, Dict
+import pandas as pd
+
+from langchain_community.vectorstores import FAISS
+from langchain_community.retrievers import BM25Retriever
 
 from langchain.schema import Document
 from langchain.schema.runnable import RunnableConfig
@@ -13,6 +17,9 @@ from langchain_core.callbacks import (
     AsyncCallbackManagerForRetrieverRun,
     CallbackManagerForRetrieverRun,
 )
+
+from load_table import get_data_from_json
+from build_index import get_retrievers
 
 import config
 
@@ -141,6 +148,8 @@ class TeamlyRetriever(BaseRetriever):
     client_secret: str = ""
     auth_code: str = ""
     redirect_uri: str = ""
+    idx_vectors: FAISS = None
+    idx_bm25: BM25Retriever = None
     
     # pydantic-style model config so arbitrary attrs are allowed
     class Config:
@@ -174,23 +183,30 @@ class TeamlyRetriever(BaseRetriever):
         self.client_secret: str = self._auth_data["client_secret"]
         self.auth_code: str = self._auth_data["auth_code"]  # may be refresh-token
         self.redirect_uri: str = self._auth_data["redirect_uri"]
-
         # dynamic header (gets rebuilt after refresh)
         self._headers = lambda: {
             "X-Account-Slug": "default",
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.auth_code}",
         }
+        #shall be last call in chain, since it uses initialize teamly search params
+        self.load_sd_articles_index()
 
-    # --------------------------------- public LangChain hook -------------
+    def load_sd_articles_index(self):
+        with open ("./data/sd_articles.json", "r") as f:
+            articles = json.load(f)
+        df = pd.DataFrame()
+        for article_id in articles["articles"]:
+            article_info = self.get_article_info(article_id)
+            space_id = article_info["space_id"]
+            article_title = article_info["title"]
+            raw_doc = article_info["editorContentObject"]["content"]
+            doc = json.loads(raw_doc)
+            arcticle_df = get_data_from_json(doc, space_id, article_id, article_title)
+            df = pd.concat([df, arcticle_df], ignore_index=True)
+        (self.idx_vectors, self.idx_bm25) = get_retrievers(df)            
 
-    def _get_relevant_documents(        # type: ignore[override]
-        self,
-        query: str,
-        *,
-        run_manager: CallbackManagerForRetrieverRun,
-        **kwargs: Any,  # for LC internal plumbing
-    ) -> List[Document]:
+    def _get_documents_from_teamly_search(self, query: str) -> List[Document]:
         """Synchronous retrieval used by most LC components."""
         raw_hits = self._semantic_search(query)[: self.k]
         
@@ -235,8 +251,31 @@ class TeamlyRetriever(BaseRetriever):
                     },
                 )
                 documents.append(document)
-    
         return documents
+
+    def _get_documents_from_sd_tables(self, query: str) -> List[Document]:
+        documents = []
+        if self.idx_vectors:
+            v_res = self.idx_vectors.similarity_search(query, k=self.k)
+            documents.extend(v_res)
+        if self.idx_bm25:
+            bm25_res = self.idx_bm25.invoke(query)[:self.k]
+            documents.extend(bm25_res)
+        return documents
+        
+    # --------------------------------- public LangChain hook -------------
+    def _get_relevant_documents(        # type: ignore[override]
+        self,
+        query: str,
+        *,
+        run_manager: CallbackManagerForRetrieverRun,
+        **kwargs: Any,  # for LC internal plumbing
+    ) -> List[Document]:
+        documents = self._get_documents_from_teamly_search(query = query)
+        sd_documents = self._get_documents_from_sd_tables(query = query)
+        documents.extend(sd_documents)
+        return documents
+    
     async def _aget_relevant_documents(  # type: ignore[override]
         self,
         query: str,
@@ -317,10 +356,10 @@ class TeamlyRetriever(BaseRetriever):
         return self._post("/api/v1/semantic/external/search", payload)
 
     def get_article(self, article_id: str, max_length: int = 0) -> str:
-        article_info = self.get_article_info(article_id)
+        article_info = self.get_article_info(article_id, max_length)
         return _get_article_text(self.base_url, article_info)
 
-    def get_article_info(self, article_id: str) -> str:
+    def get_article_info(self, article_id: str, max_length: int = 0) -> str:
         payload = {
             "query": {
                 "__filter": {
@@ -328,13 +367,14 @@ class TeamlyRetriever(BaseRetriever):
                             "editorContentAfterVersionAt": 1711433043
                         },
                 "title": True,
+                "space_id": True,
                 "editorContentObject": {
                     "content": True
                 }                
             }
         }
         return self._post("/api/v1/wiki/ql/article", payload)
-
+    
     def _to_document(self, hit: dict) -> Document:
         """
         Convert one semantic-search hit (see sample payload below) into a
@@ -394,9 +434,6 @@ if __name__ == "__main__":
     from langchain_core.prompts import ChatPromptTemplate, StringPromptTemplate
     from typing import Any
     from pprint import pprint
-    import torch
-    from langchain_community.cross_encoders import HuggingFaceCrossEncoder
-    from langchain.retrievers.document_compressors import CrossEncoderReranker
 
     class KBDocumentPromptTemplate(StringPromptTemplate):
         max_length : int = 0
@@ -418,14 +455,7 @@ if __name__ == "__main__":
         def _prompt_type(self) -> str:
             return "kb_document"
         
-    teamly_retriever = TeamlyRetriever("./auth.json", k=40)
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    MAX_RETRIEVALS = 5
-    reranker_model = HuggingFaceCrossEncoder(model_name=config.RERANKING_MODEL, model_kwargs = {'trust_remote_code': True, "device": device})
-    reranker = CrossEncoderReranker(model=reranker_model, top_n=MAX_RETRIEVALS)
-    retriever = TeamlyContextualCompressionRetriever(
-            base_compressor=reranker, base_retriever=teamly_retriever
-            )
+    retriever = TeamlyRetriever("./auth.json", k=5)
 
     llm = ChatOpenAI(model="gpt-4.1-mini")
     with open("./prompt.txt", encoding="utf-8") as f:
@@ -442,5 +472,5 @@ if __name__ == "__main__":
     docs_chain = create_stuff_documents_chain(llm, system_prompt, document_prompt=my_prompt, document_separator='\n#EOD\n\n')
     rag_chain = create_retrieval_chain(retriever, docs_chain)
 
-    result = rag_chain.invoke({"input": "Льготный лизинг колесной техники"})
+    result = rag_chain.invoke({"input": "Кто такие key users?"})
     pprint(result)
