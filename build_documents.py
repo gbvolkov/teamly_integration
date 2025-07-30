@@ -20,7 +20,8 @@ def get_documents(df: pd.DataFrame) -> list[Document]:
                 "problem_solution": row["problem_solution"],
                 "space_id": row["space_id"],
                 "article_id": row["article_id"],
-                "article_title": row["article_title"]
+                "article_title": row["article_title"],
+                "source": "sd_qa_table"
             }
         )
         documents.append(doc)

@@ -173,9 +173,9 @@ class TeamlyAPIWrapper(BaseModel):
             "Authorization": f"Bearer {self.auth_code}",
         }
 
-        self._load_sd_articles_index()
+        self._load_sd_articles_documents()
 
-    def _load_sd_articles_index(self):
+    def _load_sd_articles_documents(self):
         with open ("./data/sd_articles.json", "r") as f:
             articles = json.load(f)
         df = pd.DataFrame()
@@ -232,6 +232,7 @@ class TeamlyAPIWrapper(BaseModel):
                         "length": total_length,
                         "merged": True,  # Flag indicating this is a merged document
                         "original_hits_count": len(hits),  # How many hits were merged
+                        "source": "semantic"
                     },
                 )
                 documents.append(document)
@@ -346,15 +347,17 @@ class TeamlyAPIWrapper(BaseModel):
         return Document(
             page_content=f"{hit["text"]}\n\nСсылка на статью:https://kb.ileasing.ru/space/{hit["space_id"]}/article/{hit["article_id"]}",
             metadata={
-                # provenance
+                "docid": f"{hit['space_id']}_{hit['article_id']}_merged",
                 "space_id": hit["space_id"],
                 "article_id": hit["article_id"],
                 "article_title": hit["article_title"],
-                # retrieval info
-                #"score": hit["score"],
-                #"chunk_token_length": hit["chunk_token_length"],
-                #"offset": hit["offset"],
-                #"length": hit["length"],
+                "score": hit["score"],
+                "chunk_token_length": hit["chunk_token_length"],
+                "offset": hit["offset"],
+                "length": hit["length"],
+                "merged": False,  # Flag indicating this is a merged document
+                "original_hits_count": 1,  # How many hits were merged
+                "source": "semantic"
             },
         )
 

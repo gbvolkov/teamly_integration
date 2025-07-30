@@ -104,7 +104,7 @@ def get_retriever_plain():
 def get_retriever_teamly():
     MAX_RETRIEVALS = 3
 
-    teamly_retriever = TeamlyRetriever("./auth.json", k=30)
+    teamly_retriever = TeamlyRetriever("./auth.json", k=40)
     device = "cuda" if torch.cuda.is_available() else "cpu"
     #device = "cpu"
     reranker_model = HuggingFaceCrossEncoder(model_name=config.RERANKING_MODEL, model_kwargs = {'trust_remote_code': True, "device": device})
