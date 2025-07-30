@@ -72,3 +72,5 @@ RERANKING_MODEL = os.environ.get('RERANKING_MODEL') or '/models/bge-reranker-lar
 
 
 DEBUG_WORKFLOW = (os.environ.get('DEBUG_WORKFLOW', default='False').lower() == 'true')
+
+RETRIEVER_TYPE=os.environ.get('RETRIEVER_TYPE', "teamly")

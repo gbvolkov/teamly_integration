@@ -2,8 +2,6 @@ import json
 from pathlib import Path
 import pandas as pd
 
-
-
 def get_data_from_json(data: str, space_id: str, article_id: str, article_title: str):
     # ---------- helpers ----------
     def extract_text(node):

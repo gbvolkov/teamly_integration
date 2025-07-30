@@ -14,7 +14,9 @@ def get_retrievers(df):
 
     # Create a FAISS vector store from the documents
     vector_store = FAISS.from_documents(documents, embedding)
+    #vector_store = None
 
     # Create a BM25 retriever from the same documents
     bm25_retriever = BM25Retriever.from_documents(documents)
+    #bm25_retriever = None
     return (vector_store, bm25_retriever)
