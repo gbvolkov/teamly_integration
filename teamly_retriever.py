@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-
 from typing import List, Optional, Dict
+from asyncio import get_running_loop
 
 
 from langchain_community.vectorstores import FAISS
@@ -17,100 +17,92 @@ from langchain_core.callbacks import (
 )
 
 from build_index import get_retrievers
-from teamly_api_wrapper import TeamlyAPIWrapper
+from teamly_api_wrapper import (
+    TeamlyAPIWrapper_SD_QA
+    , TeamlyAPIWrapper_SD_Tickets
+    , TeamlyAPIWrapper_Glossary
+    , TeamlyAPIWrapper
+)
 
 import config
+from abc import ABC, abstractmethod
 
 # ---------------------------------------------------------------------------
 # Main retriever
 # ---------------------------------------------------------------------------
 
-class TeamlyRetriever(BaseRetriever, TeamlyAPIWrapper):
-    """
-    LangChain-compatible wrapper around Teamly semantic search.
-
-    Required auth/connection data are read from *auth_data_store* – the same
-    JSON structure you used before:
-
-    ```json
-    {
-      "base_url":      "...",
-      "client_id":     "...",
-      "client_secret": "...",
-      "auth_code":     "...",   # either refresh-token or one-shot code
-      "redirect_uri":  "..."
-    }
-    ```
-    """
+class HybridTeamlyRetriever(BaseRetriever, ABC):
+    """Shared logic for hybrid FAISS + BM25 + Teamly remote search."""
+    wrapper: TeamlyAPIWrapper = None
     k: int = 5
     idx_vectors: FAISS = None
     idx_bm25: BM25Retriever = None
-    
-    # pydantic-style model config so arbitrary attrs are allowed
-    class Config:
-        arbitrary_types_allowed = True
-        underscore_attrs_are_private = True
 
-    # ---------------------------------------------------------------------
-    # Construction / auth helpers
-    # ---------------------------------------------------------------------
-
-    def __init__(self, auth_data_store: str, *, k: int = 10, **kwargs) -> None:
-        """
-        Parameters
-        ----------
-        auth_data_store:
-            Path to the JSON file that stores credentials and the last
-            (refresh) token. The file will be updated in-place whenever a new
-            token is issued.
-        k:
-            How many documents to return for every query.
-        """
-        super().__init__(auth_data_store = auth_data_store, **kwargs)
+    def __init__(
+        self,
+        wrapper: TeamlyAPIWrapper,
+        *,
+        k: int = 10,
+    ):
+        # cooperative init: wrapper already ran, BaseRetriever next
+        super().__init__()
+        self.wrapper = wrapper
         self.k = k
+        self.load_index()
 
-        #shall be last call in chain, since it uses initialize teamly search params
-        self.load_sd_articles_index()
 
-    def load_sd_articles_index(self):
-        (self.idx_vectors, self.idx_bm25) = get_retrievers(self.sd_documents)            
-
-    def _get_documents_from_sd_tables(self, query: str) -> List[Document]:
-        documents = []
+    def _index_search(self, query: str) -> list[Document]:
+        docs = []
         if self.idx_vectors:
-            v_res = self.idx_vectors.similarity_search(query, k=3)
-            documents.extend(v_res)
+            docs.extend(self.idx_vectors.similarity_search(query, k=self.k))
         if self.idx_bm25:
-            bm25_res = self.idx_bm25.invoke(query)[:3]
-            documents.extend(bm25_res)
-        return documents
-        
-    # --------------------------------- public LangChain hook -------------
-    def _get_relevant_documents(        # type: ignore[override]
-        self,
-        query: str,
-        *,
-        run_manager: CallbackManagerForRetrieverRun,
-        **kwargs: Any,  # for LC internal plumbing
-    ) -> List[Document]:
-        documents = self.get_documents_from_teamly_search(query = query)
-        sd_documents = self._get_documents_from_sd_tables(query = query)
-        #print(sd_documents)
-        #sd_documents.clear()
-        documents.extend(sd_documents)
-        return documents
-    
-    async def _aget_relevant_documents(  # type: ignore[override]
-        self,
-        query: str,
-        *,
-        config: Optional[RunnableConfig] = None,
-    ) -> List[Document]:
-        """Naïve asyncio wrapper – uses thread pool because requests is sync."""
-        from asyncio import get_running_loop
-        return await get_running_loop().run_in_executor(
-            None, lambda: self.get_relevant_documents(query=query)
+            docs.extend(self.idx_bm25.invoke(query)[: self.k])
+        return docs
+
+    @abstractmethod
+    def _get_relevant_documents(self, query: str, *, run_manager, **kw):
+        pass
+
+    async def _aget_relevant_documents(self, query: str, **kw):
+        loop = get_running_loop()
+        return await loop.run_in_executor(None, self._get_relevant_documents, query)
+
+    def load_index(self):
+        (self.idx_vectors, self.idx_bm25) = get_retrievers(self.wrapper.sd_documents)            
+
+    def refresh(self):
+        with self._refresh_lock:
+            self.wrapper._load_sd_documents()
+            self.load_index(self.wrapper.sd_documents)
+
+class TeamlyRetriever_Tickets(HybridTeamlyRetriever):
+    def __init__(self, auth_data, **kw):
+        wrapper = TeamlyAPIWrapper_SD_Tickets(auth_data_store=auth_data)
+        super().__init__(wrapper, **kw)
+    def _get_relevant_documents(self, query: str, *, run_manager, **kw):
+        return (
+            self._index_search(query)
         )
+
+class TeamlyRetriever(HybridTeamlyRetriever):
+    def __init__(self, auth_data_store, **kw):
+        wrapper = TeamlyAPIWrapper_SD_QA(auth_data_store=auth_data_store)
+        super().__init__(wrapper, **kw)
+    def _get_relevant_documents(self, query: str, *, run_manager, **kw):
+        return (
+            self.wrapper.get_documents_from_teamly_search(query)
+            + self._index_search(query)
+        )
+
+class TeamlyRetriever_Glossary(HybridTeamlyRetriever):
+    def __init__(self, auth_data_store, **kw):
+        wrapper = TeamlyAPIWrapper_Glossary(auth_data_store=auth_data_store)
+        super().__init__(wrapper, **kw)
+    def _get_relevant_documents(self, query: str, *, run_manager, **kw):
+        return (
+            self._index_search(query)
+        )
+
 
 class TeamlyContextualCompressionRetriever(ContextualCompressionRetriever):
     def _get_relevant_documents(
@@ -158,7 +150,7 @@ if __name__ == "__main__":
         def _prompt_type(self) -> str:
             return "kb_document"
         
-    retriever = TeamlyRetriever(auth_data_store="./auth.json", k=5)
+    retriever = TeamlyRetriever_Glossary(auth_data_store="./auth.json", k=5)
 
     llm = ChatOpenAI(model="gpt-4.1-mini")
     with open("./prompt.txt", encoding="utf-8") as f:

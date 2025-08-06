@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 import pandas as pd
 
-def get_data_from_json(data: str, space_id: str, article_id: str, article_title: str):
+def get_data_from_json(data: str, space_id: str, article_id: str, article_title: str, rename_map: dict):
     # ---------- helpers ----------
     def extract_text(node):
         """Recursively pull plain text from TipTap/ProseMirror nodes."""
@@ -61,16 +61,47 @@ def get_data_from_json(data: str, space_id: str, article_id: str, article_title:
 
     df = pd.DataFrame(records)
 
-    # Optional: map Russian headers to English keys you use downstream
-    rename_map = {
-        "ИС": "it_system",
-        "Описание проблемы": "problem_description",
-        "Решение": "problem_solution",
-        # Add others if you need them:
-        "Пример Тикетов": "ticket_example"
-    }
     df = df.rename(columns=rename_map)
     df[["space_id", "article_id", "article_title"]] = (space_id, article_id, article_title)
     #df["problem_description"] = df["problem_description"] + "\n\nСсылка на статью:https://kb.ileasing.ru/space/{space_id}/article/{article_id}"
     return df
 
+def get_glossary_data(data: dict, space_id: str, article_id: str, article_title: str, rename_map: dict):
+    import json
+    import pandas as pd
+    import re
+
+    rows = []
+    current_section = None       # tracks whether we are inside the abbreviations or the terms block
+
+    for node in data.get("content", []):
+        # -- 1. detect the two H1 headings that mark our sections –
+        if node.get("type") == "heading" and node.get("attrs", {}).get("level") == 1:
+            heading_text = "".join(child.get("text", "") for child in node.get("content", []))
+            heading_low  = heading_text.lower()
+            if "сокращ" in heading_low:      # «Список сокращений»
+                current_section = "abbr"
+            elif "термин" in heading_low:    # «Термины и определения»
+                current_section = "term"
+            else:
+                current_section = None
+            continue                         # go to next node
+
+        # -- 2. pick up glossary lines that live inside one of those sections –
+        if node.get("type") == "paragraph" and current_section in ("abbr", "term"):
+            plain_text = "".join(child.get("text", "") for child in node.get("content", []))
+
+            # split at the first dash rendered as “ – ” (en-dash) or " - "
+            term_and_def = re.split(r"\s[–-]\s", plain_text, maxsplit=1)
+            if len(term_and_def) == 2:
+                term, definition = (part.strip() for part in term_and_def)
+                rows.append(
+                    {"section": current_section, "term": term, "definition": definition}
+                )
+
+    # -- 3. build dataframe –
+    df = pd.DataFrame(rows)
+    df = df.rename(columns=rename_map)
+    df[["space_id", "article_id", "article_title"]] = (space_id, article_id, article_title)
+
+    return df

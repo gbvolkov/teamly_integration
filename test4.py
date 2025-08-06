@@ -4,6 +4,7 @@ from load_table import get_data_from_json
 from build_index import get_retrievers
 import pandas as pd
 
+
 tr = TeamlyRetriever("./auth.json", k=40)
 
 
