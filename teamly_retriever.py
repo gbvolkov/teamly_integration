@@ -111,7 +111,7 @@ class TeamlyRetriever_Glossary(HybridTeamlyRetriever):
         ]
         (self.idx_vectors, self.idx_bm25) = get_retrievers(docs)
     def get_abbreviations(self, query: str):
-        abbreviations = [
+        return [
             d for d in self.wrapper.sd_documents
             if d.metadata.get("source") == "abbr"
             and d.metadata["term"].lower() in query.lower().split()
@@ -186,5 +186,5 @@ if __name__ == "__main__":
     docs_chain = create_stuff_documents_chain(llm, system_prompt, document_prompt=my_prompt, document_separator='\n#EOD\n\n')
     rag_chain = create_retrieval_chain(retriever, docs_chain)
 
-    result = rag_chain.invoke({"input": "Кто такие key users?"})
+    result = rag_chain.invoke({"input": "Что делать если в АД EL выше допустимого?"})
     pprint(result)
