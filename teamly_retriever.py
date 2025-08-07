@@ -57,7 +57,13 @@ class HybridTeamlyRetriever(BaseRetriever, ABC):
             docs.extend(self.idx_vectors.similarity_search(query, k=self.k))
         if self.idx_bm25:
             docs.extend(self.idx_bm25.invoke(query)[: self.k])
-        return docs
+
+        return [
+            d
+            for seen in [set()]
+            for d in docs
+            if not (d.page_content in seen or seen.add(d.page_content))
+        ]
 
     @abstractmethod
     def _get_relevant_documents(self, query: str, *, run_manager, **kw):
