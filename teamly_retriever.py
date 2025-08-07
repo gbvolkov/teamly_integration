@@ -98,9 +98,22 @@ class TeamlyRetriever_Glossary(HybridTeamlyRetriever):
     def __init__(self, auth_data_store, **kw):
         wrapper = TeamlyAPIWrapper_Glossary(auth_data_store=auth_data_store)
         super().__init__(wrapper, **kw)
+    def load_index(self):
+        docs = [
+            d for d in self.wrapper.sd_documents
+            if d.metadata.get("source") == "term"
+        ]
+        (self.idx_vectors, self.idx_bm25) = get_retrievers(docs)
+    def get_abbreviations(self, query: str):
+        abbreviations = [
+            d for d in self.wrapper.sd_documents
+            if d.metadata.get("source") == "abbr"
+            and d.metadata["term"].lower() in query.lower().split()
+        ]
     def _get_relevant_documents(self, query: str, *, run_manager, **kw):
         return (
-            self._index_search(query)
+            self.get_abbreviations(query)
+            + self._index_search(query)
         )
 
 
