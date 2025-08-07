@@ -186,5 +186,5 @@ if __name__ == "__main__":
     docs_chain = create_stuff_documents_chain(llm, system_prompt, document_prompt=my_prompt, document_separator='\n#EOD\n\n')
     rag_chain = create_retrieval_chain(retriever, docs_chain)
 
-    result = rag_chain.invoke({"input": "Что делать если в АД EL выше допустимого?"})
+    result = rag_chain.invoke({"input": "Что делать если в АД EL выше допустимого? Выносить на КК?"})
     pprint(result)
