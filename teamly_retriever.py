@@ -168,9 +168,13 @@ if __name__ == "__main__":
         @property
         def _prompt_type(self) -> str:
             return "kb_document"
-        
+    
+    query = "Что делать если в АД EL выше допустимого? Выносить на КК?"
     retriever = TeamlyRetriever_Glossary(auth_data_store="./auth.json", k=5)
 
+    result = retriever.invoke(query)
+    pprint(result)
+    
     llm = ChatOpenAI(model="gpt-4.1-mini")
     with open("./prompt.txt", encoding="utf-8") as f:
         prompt_txt = f.read()
@@ -186,5 +190,5 @@ if __name__ == "__main__":
     docs_chain = create_stuff_documents_chain(llm, system_prompt, document_prompt=my_prompt, document_separator='\n#EOD\n\n')
     rag_chain = create_retrieval_chain(retriever, docs_chain)
 
-    result = rag_chain.invoke({"input": "Что делать если в АД EL выше допустимого? Выносить на КК?"})
+    result = rag_chain.invoke({"input": query})
     pprint(result)

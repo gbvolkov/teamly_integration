@@ -146,6 +146,7 @@ class TeamlyAPIWrapper(BaseModel, ABC):
     redirect_uri: str = ""
     sd_documents: List[Document] = []
     articles_json_path: str = ""
+    articles_data_path: str = ""
     rename_map: dict = {}
     k: int = 40
     
@@ -399,6 +400,7 @@ class TeamlyAPIWrapper_SD_Tickets(TeamlyAPIWrapper):
         "Описание решения": "solution"
     }
     articles_json_path: str = "./data/sd_tickets.json"
+    articles_data_path: str = "./data/tickets_data.json"
     def get_documents(self, df: pd.DataFrame) -> list[Document]:
         return get_documents_for_sd_tickets(df)
 
@@ -407,6 +409,7 @@ class TeamlyAPIWrapper_Glossary(TeamlyAPIWrapper):
     rename_map: dict = {
     }
     articles_json_path: str = "./data/glossary_articles.json"
+    articles_data_path: str = "./data/glossary_data.json"
     def parse_json(self, data: str, space_id: str, article_id: str, article_title: str):
         return get_glossary_data(data, space_id, article_id, article_title, self.rename_map)
     def get_documents(self, df: pd.DataFrame) -> list[Document]:
@@ -417,9 +420,32 @@ class TeamlyAPIWrapper_Glossary(TeamlyAPIWrapper):
 if __name__ == "__main__":
     from typing import Any
     from pprint import pprint
-    query = "Как удалить карточку 51 счёта?"
+    query = "Как параметры АД зависят от EL?"
 
     teamply_wrapper = TeamlyAPIWrapper_Glossary("./auth.json")
+    docs = teamply_wrapper.sd_documents
+    docs_json = [
+        {"page_content": doc.page_content, "metadata": doc.metadata}
+        for doc in docs
+    ]
+    with open(teamply_wrapper.articles_data_path, "w", encoding="utf-8") as f:
+        json.dump(docs_json, f)
+
+    result = teamply_wrapper.get_documents_from_teamly_search(query)
+    pprint(result)
+
+    pprint(teamply_wrapper.sd_documents)
+
+    query = "Как удалить карточку 51 счёта?"
+    teamply_wrapper = TeamlyAPIWrapper_SD_Tickets("./auth.json")
+    docs = teamply_wrapper.sd_documents
+    docs_json = [
+        {"page_content": doc.page_content, "metadata": doc.metadata}
+        for doc in docs
+    ]
+    with open(teamply_wrapper.articles_data_path, "w", encoding="utf-8") as f:
+        json.dump(docs_json, f)
+
 
     result = teamply_wrapper.get_documents_from_teamly_search(query)
     pprint(result)
